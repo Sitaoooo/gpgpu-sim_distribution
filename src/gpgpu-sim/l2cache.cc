@@ -77,7 +77,32 @@ memory_partition_unit::memory_partition_unit(unsigned partition_id,
     m_sub_partition[p] =
         new memory_sub_partition(sub_partition_id, m_config, stats, gpu);
   }
+//Added by Sitao
+  m_meta_cache_dram_queue = new fifo_pipeline<mem_fetch*>("Meta-to-DRAM", 0, 2000000000)
+  m_dram_meta_cache_queue = new fifo_pipeline<mem_fetch*>("DRAM-to-Meta", 0, 2000000000)
+  m_L2_meta_cache_queue = new fifo_pipeline<mem_fetch*>("L2-to-Meta", 0, 2000000000)
+  m_meta_cache_L2_queue = new fifo_pipeline<mem_fetch*>("Meta-to-L2", 0, 2000000000)
+  m_decompressor_L2_queue = new fifo_pipeline<mem_fetch*>("Decompressor-to-L2", 0, 2000000000)
+  m_meta_data_interface = new meta_data_Interface(this);
+  m_mf_allocator = new partition_mf_allocator(config)
+  metadata_cache_config.init(const_cast<char*>("N:1024:32:8,L:L:f:N:L,A:256:8,16:0,32"), FuncCachePreferNone);
+  char meta_cache_c_name[32];
+  snprintf(meta_cache_c_name, 32, "Counter_Cache%03d", m_id);
+  m_meta_cache = new metadata_cache_model(meta_cache_c_name, metadata_cache_config,-1,-1, m_meta_data_interface, IN_META_CACHE_MISS_QUEUE, gpu);
 }
+
+
+//added by Sitao
+new_addr_type memory_partition_unit::meta_cache_map_find(std::unordered_map<new_addr_type, new_addr_type>& meta_cache_map, new_addr_type data_addr){
+  std::unordered_map<new_addr_type, new_addr_type>::const_iterator got = meta_cache_map.find(data_addr);
+  if (got == meta_cache_map.end()){
+    return 0;
+  }
+  else{
+    return got->second;
+  }
+}
+
 
 void memory_partition_unit::handle_memcpy_to_gpu(
     size_t addr, unsigned global_subpart_id, mem_access_sector_mask_t mask) {
@@ -187,6 +212,92 @@ void memory_partition_unit::cache_cycle(unsigned cycle) {
        p++) {
     m_sub_partition[p]->cache_cycle(cycle);
   }
+  //Added by Sitao
+  //send metadata request back to L2 cache
+  if (m_meta_cache->access_ready() && !meta_cache_L2_queue_full()){
+    mem_fetch *mf = m_meta_cache->next_access();
+    mf->set_reply();
+    mf->set_status(IN_META_CACHE_TO_L2_QUEUE, m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle);
+    meta_cache_L2_queue_push(mf); //note that this is the queue to decompressor
+  }
+
+  //push metatdata request to dram
+  m_meta_cache->cycle();
+
+  //handle metadata request from L2 cache
+ for (unsigned p = 0; p < m_config->m_n_sub_partition_per_memory_channel;
+       p++) {
+    if (!m_sub_partition[p]->L2_meta_cache_queue_empty()){
+      mem_fetch *mf = m_sub_partition[p]->L2_meta_cache_queue_top();
+      if (mf->require_metadata_fetch){
+        new_addr_type original_data_addr = mf->get_addr();
+        //new_addr_type meta_data_addr = meta_cache_map[original_data_addr];
+        new_addr_type meta_data_addr = original_data_addr+128; //for now, just randomly assign a value
+        if (meta_data_addr != 0){
+          mem_fetch *meta_mf = m_mf_allocator->alloc(meta_data_addr, META_DATA_R, 32, false, m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle);
+          if(!m_L2_meta_cache_queue->full()){
+            m_L2_meta_cache_queue->push(meta_mf);
+            meta_mf->set_is_meta_fetch();
+            meta_mf->set_status(IN_L2_TO_META_CACHE_QUEUE, m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle);
+            m_sub_partition[p]->L2_meta_cache_queue_pop();
+          }
+        }
+      }
+    }
+  }
+  if(!L2_meta_cache_queue_empty()){
+    mem_fetch *mf = L2_meta_cache_queue_top();
+    new_addr_type meta_data_addr = mf->get_addr();
+    bool output_full = meta_cache_L2_queue_full();
+    bool port_free = m_meta_cache->data_port_free();
+    if(!output_full && port_free){
+      std::list<cache_event> events;
+      enum cache_request_status status = m_meta_cache->access(meta_data_addr, mf, 
+                                                              m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle, events);
+      bool write_sent = was_write_sent(events);
+      boll read_sent = was_read_sent(events);
+      if (status == HIT){
+        if (!write_sent){
+          assert(!read_sent);
+          if (mf->get_access_type() == META_DATA_R){
+            mf->set_reply();
+            mf->set_status(IN_META_CACHE_TO_L2_QUEUE, m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle);
+            meta_cache_L2_queue_push(mf);
+            L2_meta_cache_queue_pop();
+          }
+          else{
+            assert(0 && "Unexpected access type to metadata cache");
+          }
+        else{
+          assert(!read_sent)
+          assert(!write_sent)
+        }
+
+        }
+      }
+    }
+
+
+
+
+  //Receive metadata request from dram
+  if (!m_dram_meta_cache_queue->empty())
+  {
+    mem_fetch *mf = m_dram_meta_cache_queue->top();
+    if (m_meta_cache->fill_port_free()){
+      if (m_meta_cache->waiting_for_fill(mf)){
+        mf->set_status(IN_META_CACHE_FILL_QUEUE,m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle);
+        m_meta_cache->fill(mf,m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle);
+        m_dram_meta_cache_queue->pop();
+      }
+      else{
+        m_dram_meta_cache_queue->pop();
+        delete mf;
+      }
+    }
+  }
+
+
 }
 
 void memory_partition_unit::visualizer_print(gzFile visualizer_file) const {
@@ -433,6 +544,15 @@ memory_sub_partition::memory_sub_partition(unsigned sub_partition_id,
   m_L2_dram_queue = new fifo_pipeline<mem_fetch>("L2-to-dram", 0, L2_dram);
   m_dram_L2_queue = new fifo_pipeline<mem_fetch>("dram-to-L2", 0, dram_L2);
   m_L2_icnt_queue = new fifo_pipeline<mem_fetch>("L2-to-icnt", 0, L2_icnt);
+  /
+  /Added by Sitao
+  //initialize L2 to metadata cache queue
+  m_L2_meta_cache_queue = new fifo_pipeline<mem_fetch>("L2-to-metadata", 0, 2000000000);
+  //initialize decompressor to L2 queue
+  m_decompressor_L2_queue = new fifo_pipeline<mem_fetch>("decompressor-to-L2", 0, 2000000000);
+
+
+
   wb_addr = -1;
 }
 
@@ -549,6 +669,10 @@ void memory_sub_partition::cache_cycle(unsigned cycle) {
           // L2 cache accepted request
           m_icnt_L2_queue->pop();
         } else {
+          //added by Sitao
+          mf->set_require_metadata_fetch();
+          m_L2_meta_cache_queue->push(mf);
+
           assert(!write_sent);
           assert(!read_sent);
           // L2 cache lock-up: will try again next cycle

@@ -1,0 +1,15 @@
+{
+    "files.associations": {
+        "*.tup": "cpp",
+        "list": "cpp",
+        "algorithm": "cpp",
+        "charconv": "cpp",
+        "exception": "cpp",
+        "format": "cpp",
+        "iterator": "cpp",
+        "optional": "cpp",
+        "span": "cpp",
+        "xhash": "cpp",
+        "xutility": "cpp"
+    }
+}

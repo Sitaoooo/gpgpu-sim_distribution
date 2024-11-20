@@ -128,6 +128,12 @@ class mem_fetch {
   mem_fetch *get_original_mf() { return original_mf; }
   mem_fetch *get_original_wr_mf() { return original_wr_mf; }
 
+  //added by sitao
+  bool is_meta_fetch() = false;
+  void set_is_meta_fetch() { is_meta_fetch = true; }
+  bool require_metadata_fetch = false;
+  void set_require_metadata_fetch() { require_metadata_fetch = true; }
+
  private:
   // request source information
   unsigned m_request_uid;

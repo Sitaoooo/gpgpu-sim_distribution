@@ -31,11 +31,32 @@
 
 #include "../abstract_hardware_model.h"
 #include "dram.h"
+#include "metadata_cache.h"
 
 #include <list>
 #include <queue>
 
 class mem_fetch;
+
+//added by Sitao
+class meta_data_Interface : public mem_fetch_interface {
+public:
+        meta_data_Interface(memory_partition_unit *unit){m_unit = unit;}
+        virtual bool full(unsigned size, bool write) const{
+          return m_unit->m_meta_cache_dram_queue->full();
+        }
+        virtual void push(mem_fetch *mf){
+          if(mf->is_metadata()){
+            mf->set_status(IN_PARTITION_META_CACHE_TO_DRAM_QUEUE, m_unit->get_mgpu()->gpu_sim_cycle + m_unit->get_mgpu()->gpu_tot_sim_cycle);
+            m_unit->m_meta_cache_dram_queue->push(mf);
+          }
+        
+        }
+private:
+        memory_partition_unit *m_unit;
+
+
+}
 
 class partition_mf_allocator : public mem_fetch_allocator {
  public:
@@ -65,6 +86,107 @@ class memory_partition_unit {
   memory_partition_unit(unsigned partition_id, const memory_config *config,
                         class memory_stats_t *stats, class gpgpu_sim *gpu);
   ~memory_partition_unit();
+
+  //Sitao's modification
+
+  //create a metadata cache
+  metadata_cache_model *m_meta_cache;
+  class meata_data_Interface* m_meta_data_interface;
+  mutable cache_config m_meta_cache_config;
+  partition_mf_allocator *m_mf_allocator;
+
+
+  //record the number of meta cache hits and misses
+  int meta_misses = 0;
+  int meta_hits = 0;
+  int meta_reservation_fails = 0;
+
+  //for mapping the data address to the metadata address
+  std::unordered_map<new_addr_type, new_addr_type> meta_cache_map;
+  new_addr_type meta_cache_map_find(std::unordered_map<new_addr_type, new_addr_type>& meta_cache_map, new_addr_type data_addr);
+
+  //create meta_data_to_dram queue for metadata cache & its associated functions
+  fifo_pipeline<mem_fetch> *m_meta_cache_dram_queue;
+  bool meta_cache_dram_queue_full() const{
+    return m_meta_cache_dram_queue->full();
+  }
+  class mem_fetch *meta_cache_dram_queue_top() const{
+    return m_meta_cache_dram_queue->top();
+  }
+  void meta_cache_dram_queue_pop() {
+    m_meta_cache_dram_queue->pop();
+  }
+  void meta_cache_dram_queue_push(class mem_fetch *mf){
+    m_meta_cache_dram_queue->push(mf);
+  }
+
+  //create dram to meta_data queue for metadata cache & its associated functions
+  fifo_pipeline<mem_fetch> *m_dram_meta_cache_queue;
+  bool dram_meta_cache_queue_full() const{
+    return m_dram_meta_cache_queue->full();
+  }
+  class mem_fetch *dram_meta_cache_queue_top() const{
+    return m_dram_meta_cache_queue->top();
+  }
+  void dram_meta_cache_queue_pop(){
+    m_dram_meta_cache_queue->pop();
+  }
+  void dram_meta_cache_queue_push(class mem_fetch *mf){
+    m_dram_meta_cache_queue->push(mf);
+  }
+
+  //create L2 cache to metadata cache queue
+  fifo_pipeline<mem_fetch> *m_L2_meta_cache_queue;
+  bool L2_meta_cache_queue_full() const{
+
+    return m_L2_meta_cache_queue->full();
+  }
+  class mem_fetch *L2_meta_cache_queue_top() const{
+    return m_L2_meta_cache_queue->top();
+  }
+  void L2_meta_cache_queue_pop(){
+    m_L2_meta_cache_queue->pop();
+  }
+  void L2_meta_cache_queue_push (class mem_fetch *mf){
+    m_L2_meta_cache_queue->push(mf);
+  }
+
+  //create metadata cache to (decompressor)L2 cache queue
+  fifo_pipeline<mem_fetch> *m_meta_cache_L2_queue;
+  bool meta_cache_L2_queue_full() const{
+    return m_meta_cache_L2_queue->full();
+  }
+  class mem_fetch *meta_cache_L2_queue_top() const{
+    return m_meta_cache_L2_queue->top();
+  }
+  void meta_cache_L2_queue_pop(){
+    m_meta_cache_L2_queue->pop();
+  }
+  void meta_cache_L2_queue_push(class mem_fetch *mf){
+    m_meta_cache_L2_queue->push(mf);
+  }
+
+  //create queue from decompressor the in the inlet of L2 cache
+  fifo_pipeline<mem_fetch> *m_decompressor_L2_queue;
+  bool decompressor_L2_queue_full() const{
+    return m_decompressor_L2_queue->full();
+  }
+  class mem_fetch *decompressor_L2_queue_top() const{
+    return m_decompressor_L2_queue->top();
+  }
+  void decompressor_L2_queue_pop(){
+    m_decompressor_L2_queue->pop();
+  }
+  void decompressor_L2_queue_push(class mem_fetch *mf){
+    m_decompressor_L2_queue->push(mf);
+  }  
+  private:
+
+
+//end of Sitao's modification
+
+
+
 
   bool busy() const;
 
@@ -179,6 +301,42 @@ class memory_sub_partition {
   bool dram_L2_queue_full() const;
   void dram_L2_queue_push(class mem_fetch *mf);
 
+
+//added by Sitao
+//create a L2 to metadata cache queue interface at partition level
+  bool L2_meta_cache_queue_full() const {
+    return m_L2_meta_cache_queue->full();
+  }
+  bool L2_meta_cache_queue_empty() const {
+    return m_L2_meta_cache_queue->empty();
+  }
+  class mem_fetch *L2_meta_cache_queue_top() const {
+    return m_L2_meta_cache_queue->top();
+  }
+  void L2_meta_cache_queue_pop(){
+    m_L2_meta_cache_queue->pop();
+  }
+  void L2_meta_cache_queue_push(class mem_fetch *mf){
+    m_L2_meta_cache_queue->push(mf);
+  }
+
+//create a decompressor to L2 cache queue interface at partition level
+  bool decompressor_L2_queue_full() const {
+    return m_decompressor_L2_queue->full();
+  }
+  bool decompressor_L2_queue_empty() const {
+    return m_decompressor_L2_queue->empty();
+  }
+  class mem_fetch *decompressor_L2_queue_top() const {
+    return m_decompressor_L2_queue->top();
+  }
+  void decompressor_L2_queue_pop(){
+    m_decompressor_L2_queue->pop();
+  }
+  void decompressor_L2_queue_push(class mem_fetch *mf){
+    m_decompressor_L2_queue->push(mf);
+  }
+
   void visualizer_print(gzFile visualizer_file);
   void print_cache_stat(unsigned &accesses, unsigned &misses) const;
   void print(FILE *fp) const;
@@ -217,6 +375,12 @@ class memory_sub_partition {
   fifo_pipeline<mem_fetch> *m_L2_dram_queue;
   fifo_pipeline<mem_fetch> *m_dram_L2_queue;
   fifo_pipeline<mem_fetch> *m_L2_icnt_queue;  // L2 cache hit response queue
+
+//added by Sitao:
+//create a L2 to metadata cache queue
+  fifo_pipeline<mem_fetch> *m_L2_meta_cache_queue;
+//create a decompressor to L2 queue
+  fifo_pipeline<mem_fetch> *m_decompressor_L2_queue;
 
   class mem_fetch *L2dramout;
   unsigned long long int wb_addr;
