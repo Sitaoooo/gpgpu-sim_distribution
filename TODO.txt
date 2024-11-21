@@ -1,0 +1,39 @@
+####The workflow of metadata compression ratio cache###
+
+1. L2 cache misses: here we assume data in L2 cache is uncompressed:
+L2 cache generate miss request to L2 to dram queue; L2 cache generate fetch
+request for metadata and send to metadata cache 
+→Modification in memory sub partition→cache_cycle(), miss
+→Modification on mem_fetch: need to identify whether it is a request for metadata
+(is_meta_fecth)
+→Modification: add a unordered mapping between address of meta data cache:
+right now just randomly mapping
+
+2. L2 cache to dram, no need to change
+
+3. L2 cache to metadata cache, a fifo L2 to meta queue on the partition level
+
+4. metadata cache receive the memory request: process whether it is a hit or
+miss:
+if hit, send the request back to meta data to decompressor queue: 
+Modification: a meta data to decompressor
+if miss, send the request to meta_cache
+
+5. In dram_cycle: 
+Something we need to consider: the inconsistent bandwidth occupied of
+mem_fetch for meta_data and L2 data, perhaps a waste of memory?
+return_queue, need to differentiate whether it is a (is_meta_fetch), and 
+if is_meta_fetch: send to dram_to_meta_queue, and fill meta_data_cache (done in
+memory_partition→cycle())
+Modification on GPGPU_sim 2
+if is l2 fetch: need to send to decompressor in dram_to_decompressor 
+Modification: re-route: decompressor.cycle() send the request back to the
+individual subpartition, in its decompressor to L2 cache_queue
+
+6. Decompressor implementation:
+initialize decompressor in memory_partition
+Modification: a decompressor storing a matching entry table, each entry object is
+a pair of mem fetch
+-reserve a spot for decompressing
+Need a decompressor→cycle(): take in request from dram-to-decompressor queue, and take in request from meta_data; compare and start decompressor
+(with a delay); take the return queue and send them back to submemory_partition
